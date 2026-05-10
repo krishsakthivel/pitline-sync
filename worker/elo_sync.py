@@ -13,9 +13,8 @@ import sys
 import os
 from collections import defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from config import Config
+class Config:
+    DATABASE_URL = os.environ["DATABASE_URL"]
 import psycopg2
 import psycopg2.extras
 
