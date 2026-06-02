@@ -20,9 +20,13 @@ import psycopg2
 import psycopg2.extras
 from pitlinev5 import RobotEvents, TeamAnalyzer, EventAnalyzer
 
-class Config:
-    DATABASE_URL      = os.environ["DATABASE_URL"]
-    ROBOTEVENTS_TOKEN = os.environ["ROBOTEVENTS_TOKEN"]
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from config import Config
+except ImportError:
+    class Config:
+        DATABASE_URL      = os.environ["DATABASE_URL"]
+        ROBOTEVENTS_TOKEN = os.environ["ROBOTEVENTS_TOKEN"]
 # Inlined from app.services.stats to avoid importing the full app
 def calc_season_stats(rankings):
     if not rankings:
@@ -294,13 +298,17 @@ def sync_team(conn, team_row, api_data):
 
     with conn.cursor() as cur:
         for event in events:
+            cur.execute("SAVEPOINT sp")
             try:
                 upsert_event(cur, event)
+                cur.execute("RELEASE SAVEPOINT sp")
             except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp")
                 log.warning("  event %s skipped: %s", event.get("id"), e)
 
         match_ok = match_fail = 0
         for match in matches:
+            cur.execute("SAVEPOINT sp")
             try:
                 event_stub = match.get("event") or {}
                 cur.execute("""
@@ -313,22 +321,30 @@ def sync_team(conn, team_row, api_data):
                     "season_id": CURRENT_SEASON,
                 })
                 upsert_match(cur, match)
+                cur.execute("RELEASE SAVEPOINT sp")
                 match_ok += 1
             except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp")
                 match_fail += 1
                 log.warning("  match %s skipped: %s", match.get("id"), e)
         log.info("  matches: %d stored, %d skipped", match_ok, match_fail)
 
         for ranking in rankings:
+            cur.execute("SAVEPOINT sp")
             try:
                 upsert_ranking(cur, team_id, ranking)
+                cur.execute("RELEASE SAVEPOINT sp")
             except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp")
                 log.warning("  ranking skipped: %s", e)
 
         for skill in api_data.get("skills", []):
+            cur.execute("SAVEPOINT sp")
             try:
                 upsert_skill(cur, team_id, skill)
+                cur.execute("RELEASE SAVEPOINT sp")
             except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp")
                 log.warning("  skill %s skipped: %s", skill.get("id"), e)
 
         awards = api_data.get("awards", [])
@@ -341,6 +357,7 @@ def sync_team(conn, team_row, api_data):
                 awards = []
         award_ok = award_fail = 0
         for award in awards:
+            cur.execute("SAVEPOINT sp")
             try:
                 event_stub = award.get("event") or {}
                 if event_stub.get("id"):
@@ -354,8 +371,10 @@ def sync_team(conn, team_row, api_data):
                         "season_id": CURRENT_SEASON,
                     })
                 upsert_award(cur, team_id, award)
+                cur.execute("RELEASE SAVEPOINT sp")
                 award_ok += 1
             except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp")
                 award_fail += 1
                 log.warning("  award %s skipped: %s", award.get("id"), e)
         log.info("  awards: %d stored, %d skipped", award_ok, award_fail)
@@ -391,9 +410,12 @@ def sync_team(conn, team_row, api_data):
 
 # ── Population pass ───────────────────────────────────────────────────────────
 
-def populate_teams_table(conn):
-    log.info("Starting population pass...")
-    all_teams = fetch_all_season_teams()
+def populate_teams_table(conn, program_id=1):
+    log.info("Starting population pass (program_id=%d)...", program_id)
+    if program_id == 1:
+        all_teams = fetch_all_season_teams()
+    else:
+        all_teams = _re._get("/teams", {"program[]": program_id, "season[]": CURRENT_SEASON, "registered": True})
 
     with conn.cursor() as cur:
         for t in all_teams:
@@ -502,6 +524,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pitline sync worker")
     parser.add_argument("--populate", action="store_true",
                         help="Seed the teams table from RobotEvents (run once on first deploy)")
+    parser.add_argument("--program", type=int, default=1,
+                        help="Program ID to populate (1=HS VRC, 4=MS VRC)")
     parser.add_argument("--once", action="store_true",
                         help="Run one sync cycle then exit")
     args = parser.parse_args()
@@ -510,7 +534,7 @@ if __name__ == "__main__":
     log.info("Connected to Supabase")
 
     if args.populate:
-        populate_teams_table(conn)
+        populate_teams_table(conn, program_id=args.program)
         if not args.once:
             sys.exit(0)
 
